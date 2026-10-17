@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { AnalyzedMove } from "@/lib/chess-api";
 import { formatEval } from "@/lib/chess-api";
+import { CLASSIFICATION_META } from "./ClassificationBadge";
 import { MoveEvaluationSymbol } from "./MoveEvaluationSymbol";
 import { cn } from "@/lib/utils";
 
@@ -43,6 +44,8 @@ export function MoveList({ moves, activeIndex, onSelect }: MoveListProps) {
         ref={active ? activeRef : undefined}
         type="button"
         onClick={() => onSelect(move.ply)}
+        aria-label={`${move.san}, ${move.classification} move`}
+        title={`${move.san} — ${move.classification} move`}
         className={cn(
           "flex min-w-0 flex-1 items-center justify-between gap-1 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
           active
@@ -66,10 +69,12 @@ export function MoveList({ moves, activeIndex, onSelect }: MoveListProps) {
     );
   };
 
+  const activeMove = moves.find((move) => move.ply === activeIndex);
+
   return (
-    <div className="panel flex max-h-[420px] flex-col overflow-hidden">
+    <div className="panel flex max-h-[620px] flex-col overflow-hidden">
       <div className="border-b border-border px-4 py-3 text-sm font-semibold">Moves</div>
-      <div className="scroll-slim flex-1 overflow-y-auto p-2">
+      <div className="scroll-slim max-h-[340px] overflow-y-auto p-2">
         {pairs.map((pair, i) => (
           <div key={i} className="flex items-center gap-1">
             <span className="w-8 shrink-0 text-right font-mono text-xs text-muted-foreground">
@@ -80,6 +85,36 @@ export function MoveList({ moves, activeIndex, onSelect }: MoveListProps) {
           </div>
         ))}
       </div>
+      <section className="space-y-2 border-t border-border p-4" aria-live="polite">
+        <h3 className="text-sm font-semibold">
+          {activeMove ? `Why ${activeMove.san}?` : "Move explanation"}
+        </h3>
+        {activeMove ? (
+          <>
+            <div className="flex items-center gap-2">
+              <MoveEvaluationSymbol classification={activeMove.classification} className="size-6" />
+              <span className="text-xs font-semibold text-muted-foreground">
+                {CLASSIFICATION_META[activeMove.classification].label}
+              </span>
+            </div>
+            <p className="text-sm leading-relaxed text-muted-foreground">
+              {activeMove.explanation ??
+                "This saved analysis has no move explanation. Analyze the game again to generate one."}
+            </p>
+            <div className="rounded-lg bg-secondary/70 p-3">
+              <p className="text-xs font-semibold text-foreground">Suggested move</p>
+              <p className="mt-1 text-sm leading-relaxed text-muted-foreground">
+                {activeMove.suggestion ??
+                  "Reanalyze this game with the updated backend to get the engine's move suggestion."}
+              </p>
+            </div>
+          </>
+        ) : (
+          <p className="text-sm text-muted-foreground">
+            Select a move to see why it received its grade and what Stockfish suggests.
+          </p>
+        )}
+      </section>
     </div>
   );
 }

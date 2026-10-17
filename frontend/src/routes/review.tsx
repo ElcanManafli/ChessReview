@@ -7,7 +7,11 @@ import { MoveList } from "@/components/chess/MoveList";
 import { PlaybackControls } from "@/components/chess/PlaybackControls";
 import { GameSummary } from "@/components/chess/GameSummary";
 import { MoveEvaluationSymbol } from "@/components/chess/MoveEvaluationSymbol";
-import { ANALYSIS_STORAGE_KEY, type GameAnalysis } from "@/lib/chess-api";
+import {
+  ANALYSIS_STORAGE_KEY,
+  normalizeMoveClassification,
+  type GameAnalysis,
+} from "@/lib/chess-api";
 import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/review")({
@@ -49,7 +53,16 @@ function ReviewPage() {
     const stored = sessionStorage.getItem(ANALYSIS_STORAGE_KEY);
     if (!stored) return;
     try {
-      setAnalysis(JSON.parse(stored) as GameAnalysis);
+      const savedAnalysis = JSON.parse(stored) as GameAnalysis;
+      setAnalysis({
+        ...savedAnalysis,
+        moves: savedAnalysis.moves.map((move) => ({
+          ...move,
+          classification: normalizeMoveClassification(move.classification),
+          explanation: typeof move.explanation === "string" ? move.explanation : null,
+          suggestion: typeof move.suggestion === "string" ? move.suggestion : null,
+        })),
+      });
       setActiveIndex(-1);
     } catch {
       sessionStorage.removeItem(ANALYSIS_STORAGE_KEY);

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import { Chessboard } from "react-chessboard";
 import type { MoveClassification } from "@/lib/chess-api";
 import { MoveEvaluationSymbol } from "./MoveEvaluationSymbol";
@@ -11,7 +11,7 @@ interface AnalysisBoardProps {
   id: string;
 }
 
-export function AnalysisBoard({
+export const AnalysisBoard = memo(function AnalysisBoard({
   position,
   lastMove,
   classification,
@@ -64,4 +64,4 @@ export function AnalysisBoard({
       )}
     </div>
   );
-}
+});

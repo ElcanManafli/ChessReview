@@ -2,16 +2,30 @@ import type { CSSProperties } from "react";
 import type { MoveClassification } from "@/lib/chess-api";
 import { cn } from "@/lib/utils";
 
-const SYMBOLS: Record<MoveClassification, { text: string; className: string }> = {
-  book: { text: "📖︎", className: "book" },
-  brilliant: { text: "!!", className: "brilliant" },
-  great: { text: "!", className: "great" },
-  best: { text: "★", className: "best" },
-  good: { text: "✓", className: "good" },
-  inaccuracy: { text: "?!", className: "inaccuracy" },
-  mistake: { text: "?", className: "mistake" },
-  blunder: { text: "??", className: "blunder" },
-  missed_win: { text: "❌", className: "missed-win" },
+const QUALITY_ICONS: Record<MoveClassification, string> = {
+  brilliant: "brilliant.png",
+  great: "great.png",
+  best: "best.png",
+  excellent: "excellent.png",
+  good: "good.png",
+  book: "book.png",
+  inaccuracy: "inaccuracy.png",
+  mistake: "mistake.png",
+  blunder: "blunder.png",
+  miss: "miss.png",
+};
+
+const QUALITY_LABELS: Record<MoveClassification, string> = {
+  brilliant: "Brilliant",
+  great: "Great",
+  best: "Best",
+  excellent: "Excellent",
+  good: "Good",
+  book: "Book",
+  inaccuracy: "Inaccuracy",
+  mistake: "Mistake",
+  blunder: "Blunder",
+  miss: "Miss",
 };
 
 export function MoveEvaluationSymbol({
@@ -23,18 +37,19 @@ export function MoveEvaluationSymbol({
   className?: string;
   style?: CSSProperties;
 }) {
-  const symbol = SYMBOLS[classification];
   return (
     <span
-      aria-label={symbol.text}
-      className={cn(
-        "move-evaluation-symbol",
-        `move-evaluation-symbol--${symbol.className}`,
-        className,
-      )}
+      role="img"
+      aria-label={`${QUALITY_LABELS[classification]} move`}
+      title={`${QUALITY_LABELS[classification]} move`}
+      className={cn("move-evaluation-symbol", className)}
       style={style}
     >
-      {symbol.text}
+      <img
+        src={`${import.meta.env.BASE_URL}move-quality/${QUALITY_ICONS[classification]}`}
+        alt=""
+        draggable={false}
+      />
     </span>
   );
 }

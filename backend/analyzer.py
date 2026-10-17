@@ -9,6 +9,218 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+CLASSIFICATION_SYMBOLS: dict[str, str] = {
+    "book": "📖",
+    "brilliant": "!!",
+    "great": "!",
+    "best": "★",
+    "excellent": "✔",
+    "good": "",
+    "inaccuracy": "?!",
+    "mistake": "?",
+    "blunder": "??",
+    "miss": "❌",
+    "Book": "📖",
+    "Brilliant": "!!",
+    "Great": "!",
+    "Best": "★",
+    "Excellent": "✔",
+    "Good": "",
+    "Inaccuracy": "?!",
+    "Mistake": "?",
+    "Blunder": "??",
+    "Miss": "❌",
+}
+
+
+def _normalize_category(classification: str) -> str:
+    key = classification.strip()
+    if key in CLASSIFICATION_SYMBOLS:
+        return key
+    return key.lower()
+
+
+def move_symbol(classification: str) -> str:
+    key = _normalize_category(classification)
+    return CLASSIFICATION_SYMBOLS.get(key, "")
+
+
+def _move_feedback(
+    *,
+    classification: str,
+    san: str,
+    best_move_san: str,
+    loss_cp: float,
+    material_sacrifice: float,
+    eval_after: float,
+    is_best_move: bool,
+    is_book: bool,
+    missed_mate: bool,
+    missed_tactical_sequence: bool,
+    lost_forced_mate: bool,
+    second_best_wdl_drop: float,
+    depth: int,
+) -> tuple[str, str]:
+    loss = max(0.0, loss_cp) / 100
+    loss_text = f"about {loss:.1f} pawns" if loss >= 0.25 else "very little"
+
+    if is_book:
+        return (
+            "This move follows a recognized opening line, so the engine did not separately compare it with alternatives.",
+            "Continue developing your pieces, contest the center, and keep your king safe.",
+        )
+    if classification == "Brilliant":
+        why = (
+            f"This is the engine's top move. It accepts a sacrifice of about "
+            f"{material_sacrifice:.1f} material points while keeping your evaluation at "
+            f"{eval_after:+.1f} pawns."
+        )
+    elif classification == "Great":
+        why = (
+            "This is the engine's critical top move; its second choice is substantially worse "
+            "for your winning chances."
+        )
+    elif classification == "Best":
+        why = "You played the engine's top-recommended move in this position."
+    elif classification == "Excellent":
+        why = (
+            f"This is not the top move, but it keeps close to the best line, giving up "
+            f"{loss_text} of evaluation."
+        )
+    elif classification == "Good":
+        why = (
+            f"This is a safe, playable move. The engine's top choice is stronger, but this move "
+            f"gives up {loss_text} of evaluation."
+        )
+    elif classification == "Inaccuracy":
+        why = (
+            f"This move is playable, but it gives up {loss_text} of evaluation and makes the "
+            "position easier for your opponent."
+        )
+    elif classification == "Mistake":
+        why = (
+            f"This move loses about {loss:.1f} pawns of evaluation, a significant setback "
+            "that could give away material or a winning advantage."
+        )
+    elif classification == "Miss":
+        if lost_forced_mate:
+            why = "A forced checkmate was available for you, but this move missed it."
+        elif missed_tactical_sequence:
+            why = "A winning tactical sequence was available, but this move missed it."
+        else:
+            why = "This move missed a forcing opportunity identified by the engine."
+    elif classification == "Blunder":
+        if missed_mate:
+            why = "This move allows a forced checkmate for your opponent."
+        else:
+            why = (
+                f"This move is a serious error, giving up about {loss:.1f} pawns of evaluation "
+                "and allowing a much stronger reply."
+            )
+    else:
+        raise ValueError(f"Unsupported move classification: {classification}.")
+
+    if is_best_move:
+        suggestion = (
+            f"Keep {san}. Stockfish found no stronger alternative at depth {depth}."
+        )
+    else:
+        suggestion = (
+            f"Prefer {best_move_san} instead. Stockfish ranked it above {san} at depth {depth}."
+        )
+    if classification == "Great" and second_best_wdl_drop > 0:
+        why += (
+            f" Its second choice is about {second_best_wdl_drop * 100:.0f} percentage "
+            "points worse in estimated win probability."
+        )
+    return why, suggestion
+
+
+def _score_to_wdl(score: chess.engine.Score) -> tuple[float, float, float]:
+    cp = score.score(mate_score=100_000)
+    if cp is None:
+        mate = score.mate()
+        if mate is not None:
+            return (0.8, 0.1, 0.1) if mate > 0 else (0.1, 0.1, 0.8)
+        return (0.5, 0.0, 0.5)
+
+    x = cp / 100.0
+    win = 1.0 / (1.0 + math.exp(-0.55 * x))
+    draw = 0.35 / (1.0 + abs(x) * 0.9)
+    loss = max(0.0, 1.0 - win - draw)
+    if loss == 0.0 and win + draw < 1.0:
+        draw = 1.0 - win
+    s = win + draw + loss
+    return win / s, draw / s, loss / s
+
+
+def _wdl_thresholds(current_win_prob: float) -> dict[str, float]:
+    if current_win_prob >= 0.80:
+        return {"good": 0.02, "inaccuracy": 0.04, "mistake": 0.09, "blunder": 0.18}
+    if current_win_prob >= 0.65:
+        return {"good": 0.03, "inaccuracy": 0.06, "mistake": 0.12, "blunder": 0.22}
+    if current_win_prob >= 0.55:
+        return {"good": 0.04, "inaccuracy": 0.08, "mistake": 0.15, "blunder": 0.28}
+    if current_win_prob >= 0.45:
+        return {"good": 0.05, "inaccuracy": 0.10, "mistake": 0.18, "blunder": 0.34}
+    return {"good": 0.07, "inaccuracy": 0.12, "mistake": 0.22, "blunder": 0.42}
+
+
+def classify_move(
+    *,
+    win_prob_delta: float,
+    current_win_prob: float,
+    material_sacrifice_cp: float = 0.0,
+    eval_before: float = 0.0,
+    eval_after: float = 0.0,
+    is_tactical: bool = False,
+    is_book: bool = False,
+    is_best_move: bool = False,
+    second_best_wdl_drop: float = 0.0,
+    lost_forced_mate: bool = False,
+    missed_mate: bool = False,
+    missed_tactical_sequence: bool = False,
+) -> str:
+    if is_book:
+        return "Book"
+
+    if (
+        is_best_move
+        and material_sacrifice_cp >= BRILLIANT_MIN_SACRIFICE_CP
+        and win_prob_delta <= 0.05
+        and eval_after >= eval_before - 0.20
+    ):
+        return "Brilliant"
+
+    if (
+        is_best_move
+        and second_best_wdl_drop >= 0.30
+        and (eval_after >= 0.0 or current_win_prob >= 0.50)
+        and eval_after >= eval_before - 0.10
+    ):
+        return "Great"
+
+    if is_best_move:
+        return "Best"
+
+    if lost_forced_mate or missed_tactical_sequence:
+        return "Miss"
+
+    if missed_mate:
+        return "Blunder"
+
+    if win_prob_delta <= 0.020 and eval_after >= eval_before - 0.15:
+        return "Excellent"
+
+    thresholds = _wdl_thresholds(current_win_prob)
+    if win_prob_delta <= thresholds["good"] and eval_after >= eval_before - 0.85:
+        return "Good"
+    if win_prob_delta <= thresholds["inaccuracy"]:
+        return "Inaccuracy"
+    if win_prob_delta <= thresholds["mistake"]:
+        return "Mistake"
+    return "Blunder"
+
 import chess
 import chess.engine
 import chess.pgn
@@ -18,6 +230,7 @@ MAX_PGN_CHARACTERS = 1_000_000
 MAX_GAME_PLIES = 500
 MATE_SCORE = 20.0
 OPENING_BOOK_MAX_FULLMOVE = 10
+BRILLIANT_MIN_SACRIFICE_CP = 300.0
 OPENING_BOOK_LINES = (
     "e4 e5 Nf3 Nc6 Bb5 a6 Ba4 Nf6 O-O Be7",
     "e4 e5 Nf3 Nc6 Bc4 Bc5 c3 Nf6 d3 d6",
@@ -52,10 +265,14 @@ class AnalysisError(ValueError):
     """A user-supplied game cannot be analyzed."""
 
 
+class AnalysisBusyError(RuntimeError):
+    """The local engine is already analyzing another game."""
+
+
 @dataclass(frozen=True)
 class EngineSettings:
     path: str = "stockfish.exe" if os.name == "nt" else "stockfish"
-    depth: int = 14
+    depth: int = 15
     threads: int = 2
     hash_mb: int = 256
     timeout_seconds: float = 30.0
@@ -112,15 +329,19 @@ class ChessAnalyzer:
         if self._engine is None:
             raise RuntimeError("Stockfish is not running.")
 
-        selected_depth = depth or self.settings.depth
-        if not 8 <= selected_depth <= 24:
-            raise AnalysisError("Analysis depth must be between 8 and 24.")
+        selected_depth = self.settings.depth if depth is None else depth
+        if not 10 <= selected_depth <= 20:
+            raise AnalysisError("Analysis depth must be between 10 and 20.")
 
-        with self._lock:
+        if not self._lock.acquire(blocking=False):
+            raise AnalysisBusyError("The analysis engine is busy. Try again shortly.")
+        try:
             fen_analysis = self._analyze_fen(raw_input.strip(), selected_depth)
             if fen_analysis is not None:
                 return fen_analysis
             return self._analyze_pgn(raw_input, selected_depth)
+        finally:
+            self._lock.release()
 
     def _analyze_fen(self, raw_input: str, depth: int) -> dict[str, Any] | None:
         if "\n" in raw_input or "/" not in raw_input:
@@ -129,6 +350,8 @@ class ChessAnalyzer:
             board = chess.Board(raw_input)
         except ValueError:
             return None
+        if not board.is_valid():
+            raise AnalysisError("Invalid FEN position.")
         score = self._engine_score(board, depth).pov(chess.WHITE)
         evaluation = _score_to_pawns(score)
         return {
@@ -173,6 +396,8 @@ class ChessAnalyzer:
                 board.fullmove_number <= OPENING_BOOK_MAX_FULLMOVE
                 and move in OPENING_BOOK.get(chess.polyglot.zobrist_hash(board), set())
             )
+            centipawn_loss = 0.0
+            win_prob_delta = 0.0
 
             if is_book_move:
                 before_white_score = chess.engine.Cp(0)
@@ -184,25 +409,34 @@ class ChessAnalyzer:
                 classification = "book"
                 board.push(move)
             else:
-                before_info = self._engine_analyze(board, depth)
-                best_move = before_info.get("pv", [None])[0]
+                multipv_info = self._engine_analyze(board, depth, multipv=2)
+                best_info = multipv_info[0]
+                best_move = best_info.get("pv", [None])[0]
                 if best_move is None:
                     raise RuntimeError("Stockfish did not return a principal variation.")
 
-                best_score = before_info["score"].pov(mover).score(mate_score=100_000)
+                second_best_wdl_drop = 0.0
+                if len(multipv_info) > 1:
+                    second_best = multipv_info[1]
+                    first_wdl = _score_to_wdl(best_info["score"].pov(mover))
+                    second_wdl = _score_to_wdl(second_best["score"].pov(mover))
+                    second_best_wdl_drop = max(0.0, first_wdl[0] - second_wdl[0])
+
+                best_score = best_info["score"].pov(mover).score(mate_score=100_000)
                 if best_score is None:
                     raise RuntimeError("Stockfish returned an unscorable position.")
 
-                before_white_score = before_info["score"].pov(chess.WHITE)
+                before_white_score = best_info["score"].pov(chess.WHITE)
                 before_eval = _score_to_pawns(before_white_score)
                 board.push(move)
-                after_info = self._engine_analyze(board, depth)
+                after_info = self._engine_analyze(board, depth)[0]
                 actual_score_obj = after_info["score"].pov(mover)
                 actual_score = actual_score_obj.score(mate_score=100_000)
                 if actual_score is None:
                     raise RuntimeError("Stockfish returned an unscorable position.")
 
-                loss = max(0.0, (best_score - actual_score) / 100.0)
+                centipawn_loss = max(0.0, float(best_score - actual_score))
+                loss = centipawn_loss / 100.0
                 after_white_score = after_info["score"].pov(chess.WHITE)
                 after_eval = _score_to_pawns(after_white_score)
                 gain = (after_eval - before_eval) * (1 if mover == chess.WHITE else -1)
@@ -214,28 +448,66 @@ class ChessAnalyzer:
                     _material_balance(chess.Board(fen_before), mover)
                     - _material_balance(reply_board, mover)
                 )
-                before_mate = before_info["score"].pov(mover).mate()
+                before_mate = best_info["score"].pov(mover).mate()
                 actual_mate = actual_score_obj.mate()
-                classification = _classify(
-                    loss=loss,
-                    material_sacrifice=material_sacrifice,
-                    gain=gain,
+                best_wdl = _score_to_wdl(best_info["score"].pov(mover))
+                played_wdl = _score_to_wdl(actual_score_obj)
+                win_prob_delta = max(0.0, best_wdl[0] - played_wdl[0])
+                current_win_prob = best_wdl[0]
+                material_sacrifice_cp = max(0.0, material_sacrifice * 100)
+                is_best_move = move == best_move or move.uci() == best_move.uci()
+                classification = classify_move(
+                    win_prob_delta=win_prob_delta,
+                    current_win_prob=current_win_prob,
+                    material_sacrifice_cp=material_sacrifice_cp,
+                    eval_before=before_eval * (1 if mover == chess.WHITE else -1),
+                    eval_after=after_eval * (1 if mover == chess.WHITE else -1),
+                    is_tactical=material_sacrifice_cp >= 250.0 or gain >= 0.5,
+                    is_best_move=is_best_move,
+                    second_best_wdl_drop=second_best_wdl_drop,
                     lost_forced_mate=(
                         before_mate is not None
                         and before_mate > 0
                         and (actual_mate is None or actual_mate <= 0)
                     ),
                     missed_mate=actual_score <= -99_000 and best_score > -99_000,
+                    missed_tactical_sequence=best_score >= 500 and win_prob_delta >= 0.15,
                 )
 
             fen_after = board.fen()
+            category = _normalize_category(classification)
 
-            alternative = None
-            if classification in {"mistake", "blunder"}:
-                alternative = {
-                    "san": chess.Board(fen_before).san(best_move),
-                    "uci": best_move.uci(),
-                }
+            best_move_san = chess.Board(fen_before).san(best_move)
+            feedback, suggestion = _move_feedback(
+                classification=category,
+                san=san,
+                best_move_san=best_move_san,
+                loss_cp=centipawn_loss,
+                material_sacrifice=material_sacrifice if not is_book_move else 0.0,
+                eval_after=(
+                    after_eval * (1 if mover == chess.WHITE else -1)
+                    if not is_book_move
+                    else 0.0
+                ),
+                is_best_move=(move == best_move),
+                is_book=is_book_move,
+                missed_mate=(
+                    not is_book_move
+                    and actual_score <= -99_000
+                    and best_score > -99_000
+                ),
+                missed_tactical_sequence=(
+                    not is_book_move and best_score >= 500 and win_prob_delta >= 0.15
+                ),
+                lost_forced_mate=(
+                    not is_book_move
+                    and before_mate is not None
+                    and before_mate > 0
+                    and (actual_mate is None or actual_mate <= 0)
+                ),
+                second_best_wdl_drop=second_best_wdl_drop if not is_book_move else 0.0,
+                depth=depth,
+            )
 
             move_number = (ply // 2) + 1
             analyzed_moves.append(
@@ -254,12 +526,22 @@ class ChessAnalyzer:
                     "score_before": _score_to_json(before_white_score),
                     "score_after": _score_to_json(after_white_score),
                     "loss": round(loss, 2),
-                    "classification": classification,
+                    "centipawn_loss": int(round(centipawn_loss)),
+                    "classification": category.lower(),
+                    "category": category,
+                    "symbol": CLASSIFICATION_SYMBOLS.get(category, ""),
+                    "explanation": feedback,
+                    "suggestion": suggestion,
+                    "win_prob_delta": round(win_prob_delta, 4),
                     "best_move": {
-                        "san": chess.Board(fen_before).san(best_move),
+                        "san": best_move_san,
                         "uci": best_move.uci(),
                     },
-                    "best_alternative_move": alternative,
+                    "best_alternative_move": (
+                        {"san": best_move_san, "uci": best_move.uci()}
+                        if category.lower() in {"mistake", "blunder"}
+                        else None
+                    ),
                 }
             )
             (white_losses if mover == chess.WHITE else black_losses).append(loss)
@@ -291,14 +573,21 @@ class ChessAnalyzer:
             "final_evaluation": final_eval,
         }
 
-    def _engine_analyze(self, board: chess.Board, depth: int) -> dict[str, Any]:
-        return self._engine.analyse(
+    def _engine_analyze(
+        self,
+        board: chess.Board,
+        depth: int,
+        multipv: int = 1,
+    ) -> list[dict[str, Any]]:
+        result = self._engine.analyse(
             board,
             chess.engine.Limit(depth=depth),
+            multipv=multipv,
         )
+        return result if isinstance(result, list) else [result]
 
     def _engine_score(self, board: chess.Board, depth: int) -> chess.engine.Score:
-        return self._engine_analyze(board, depth)["score"]
+        return self._engine_analyze(board, depth)[0]["score"]
 
 
 def _score_to_pawns(score: chess.engine.Score) -> float:
@@ -311,27 +600,6 @@ def _score_to_json(score: chess.engine.Score) -> dict[str, int | str]:
     if mate is not None:
         return {"type": "mate", "value": mate}
     return {"type": "cp", "value": score.score() or 0}
-
-
-def _classify(
-    *,
-    loss: float,
-    material_sacrifice: float,
-    gain: float,
-    lost_forced_mate: bool,
-    missed_mate: bool,
-) -> str:
-    if missed_mate or lost_forced_mate or loss > 3.0:
-        return "blunder"
-    if loss > 1.0:
-        return "mistake"
-    if loss > 0.5:
-        return "inaccuracy"
-    if material_sacrifice >= 3.0 and gain >= 0.5 and loss <= 0.1:
-        return "brilliant"
-    if loss <= 0.2:
-        return "best"
-    return "good"
 
 
 def _accuracy(losses: list[float]) -> float:

@@ -1,22 +1,31 @@
-export type MoveClassification =
-  | "book"
-  | "brilliant"
-  | "great"
-  | "best"
-  | "good"
-  | "inaccuracy"
-  | "mistake"
-  | "blunder"
-  | "missed_win";
+export const MOVE_CLASSIFICATIONS = [
+  "brilliant",
+  "great",
+  "best",
+  "excellent",
+  "good",
+  "book",
+  "inaccuracy",
+  "mistake",
+  "blunder",
+  "miss",
+] as const;
+
+export type MoveClassification = (typeof MOVE_CLASSIFICATIONS)[number];
+
+const moveClassificationSet: ReadonlySet<string> = new Set(MOVE_CLASSIFICATIONS);
+
+export function normalizeMoveClassification(value: unknown): MoveClassification {
+  if (typeof value === "string" && moveClassificationSet.has(value)) {
+    return value as MoveClassification;
+  }
+  if (value === "missed_win") return "miss";
+  throw new Error(`Unsupported move quality: ${String(value)}.`);
+}
 
 export interface EngineScore {
   type: "cp" | "mate";
   value: number;
-}
-
-export interface EngineMove {
-  san: string;
-  uci: string;
 }
 
 export interface AnalyzedMove {
@@ -27,19 +36,14 @@ export interface AnalyzedMove {
   color: "w" | "b";
   from: string;
   to: string;
-  fenBefore: string;
   fenAfter: string;
-  evaluationBefore: number;
   /** White-centric evaluation in pawns after the move. */
   evaluation: number;
   /** Engine score in centipawns or mate distance, from White's perspective. */
-  scoreBefore: EngineScore;
   scoreAfter: EngineScore;
-  /** Centipawn-equivalent loss in pawns from the mover's perspective. */
-  loss: number;
   classification: MoveClassification;
-  bestMove: EngineMove;
-  bestAlternativeMove: EngineMove | null;
+  explanation: string | null;
+  suggestion: string | null;
 }
 
 export interface GameAnalysis {
@@ -58,25 +62,20 @@ export interface GameAnalysis {
   finalEvaluation: number;
 }
 
-interface ApiMove extends Omit<
-  AnalyzedMove,
-  | "moveNumber"
-  | "fenBefore"
-  | "fenAfter"
-  | "evaluationBefore"
-  | "scoreBefore"
-  | "scoreAfter"
-  | "bestMove"
-  | "bestAlternativeMove"
-> {
+interface ApiMove {
+  ply: number;
   move_number: number;
-  fen_before: string;
+  san: string;
+  uci: string;
+  color: "w" | "b";
+  from: string;
+  to: string;
   fen_after: string;
-  evaluation_before: number;
-  score_before: EngineScore;
+  evaluation: number;
   score_after: EngineScore;
-  best_move: EngineMove;
-  best_alternative_move: EngineMove | null;
+  classification: unknown;
+  explanation: unknown;
+  suggestion: unknown;
 }
 
 interface ApiAnalysis extends Omit<
@@ -120,11 +119,13 @@ async function decodeAnalysisResponse(response: Response): Promise<GameAnalysis>
     throw new Error(detail);
   }
   const data = payload as ApiAnalysis;
-  return {
-    metadata: data.metadata,
-    headers: data.headers,
-    startFen: data.start_fen,
-    moves: data.moves.map((move) => ({
+  const moves = data.moves.map((move) => {
+    if (typeof move.explanation !== "string" || typeof move.suggestion !== "string") {
+      throw new Error(
+        "The analysis API is outdated and did not return move explanations. Restart the backend and analyze the game again.",
+      );
+    }
+    return {
       ply: move.ply,
       moveNumber: move.move_number,
       san: move.san,
@@ -132,17 +133,19 @@ async function decodeAnalysisResponse(response: Response): Promise<GameAnalysis>
       color: move.color,
       from: move.from,
       to: move.to,
-      fenBefore: move.fen_before,
       fenAfter: move.fen_after,
-      evaluationBefore: move.evaluation_before,
       evaluation: move.evaluation,
-      scoreBefore: move.score_before,
       scoreAfter: move.score_after,
-      loss: move.loss,
-      classification: move.classification,
-      bestMove: move.best_move,
-      bestAlternativeMove: move.best_alternative_move,
-    })),
+      classification: normalizeMoveClassification(move.classification),
+      explanation: move.explanation,
+      suggestion: move.suggestion,
+    };
+  });
+  return {
+    metadata: data.metadata,
+    headers: data.headers,
+    startFen: data.start_fen,
+    moves,
     whiteAccuracy: data.white_accuracy,
     blackAccuracy: data.black_accuracy,
     summary: data.summary,
@@ -170,7 +173,7 @@ async function postAnalysis(
 }
 
 export function analyzePgn(pgn: string): Promise<GameAnalysis> {
-  return postAnalysis("/api/analyze", JSON.stringify({ pgn }), {
+  return postAnalysis("/api/analyze?compact=true", JSON.stringify({ pgn }), {
     "Content-Type": "application/json",
   });
 }
@@ -178,7 +181,9 @@ export function analyzePgn(pgn: string): Promise<GameAnalysis> {
 export function analyzePgnFile(file: File, depth?: number): Promise<GameAnalysis> {
   const form = new FormData();
   form.append("file", file);
-  const query = depth === undefined ? "" : `?depth=${encodeURIComponent(depth)}`;
+  const params = new URLSearchParams({ compact: "true" });
+  if (depth !== undefined) params.set("depth", String(depth));
+  const query = `?${params.toString()}`;
   return postAnalysis(`/api/analyze/file${query}`, form);
 }
 

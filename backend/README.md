@@ -20,7 +20,7 @@ py -m pip install -r backend\requirements.txt
 py -m uvicorn backend.main:app --reload --port 8000
 ```
 
-On macOS/Linux, activate with `source .venv/bin/activate` and use `python -m uvicorn backend.main:app --reload --port 8000`. The API starts Stockfish once and reuses its UCI process; a missing or invalid binary prevents startup. Set `STOCKFISH_DEPTH` (8-24), `STOCKFISH_THREADS`, `STOCKFISH_HASH_MB`, and comma-separated `CORS_ORIGINS` to configure deployment. Keep the allowed origins restricted to the actual frontend origins in production.
+On macOS/Linux, activate with `source .venv/bin/activate` and use `python -m uvicorn backend.main:app --reload --port 8000`. The API starts Stockfish once and reuses its UCI process; a missing or invalid binary prevents startup. Set `STOCKFISH_DEPTH` (10-20, default 15), `STOCKFISH_THREADS`, `STOCKFISH_HASH_MB`, and comma-separated `CORS_ORIGINS` to configure deployment. `CORS_ORIGINS` defaults to localhost development origins; set it to the exact frontend origins in production.
 
 ## Endpoints
 
@@ -29,9 +29,9 @@ On macOS/Linux, activate with `source .venv/bin/activate` and use `python -m uvi
 - `POST /api/analyze/file?depth=14` accepts multipart form data with a `file` field containing a UTF-8 PGN.
 - `GET /docs` provides the interactive OpenAPI reference.
 
-Depth is optional and bounded from 8 to 24. The service limits input to 1 MB and games to 500 plies. Engine access is serialized because a single UCI process cannot safely serve concurrent searches.
+Depth is optional, defaults to 15, and is bounded from 10 to 20. The service limits PGN input to 1 MB, HTTP request bodies to 1.1 MB, and games to 500 plies. Each API process runs one persistent UCI engine; concurrent analysis submissions receive HTTP 429 rather than accumulating in an unbounded engine wait queue. MultiPV is limited to the two leading moves needed for classification.
 
-Each move returns FEN before and after, SAN/UCI, white-centric evaluations and score objects (`{"type":"cp","value":34}` or `{"type":"mate","value":3}`), centipawn loss from the mover's perspective, a classification, and the engine's best move. `best_alternative_move` is populated for mistakes and blunders. Common opening lines are recognized with Polyglot position hashes through full move 10; matching moves are classified as `book` with zero loss and are not sent to Stockfish for evaluation.
+The default response includes full per-move details, including FEN before and after, evaluations, score objects, centipawn loss, best-move alternatives, and deterministic, rule-based `explanation` and `suggestion` text for each move. These explanations use fixed templates and engine results; they do not call an AI service or consume language-model tokens. Add `?compact=true` to either analysis endpoint to return only fields needed for move playback and move feedback; the frontend uses this mode. Common opening lines are recognized with Polyglot position hashes through full move 10; matching moves are classified as `book` with zero loss and are not sent to Stockfish for evaluation.
 
 ## Frontend integration
 

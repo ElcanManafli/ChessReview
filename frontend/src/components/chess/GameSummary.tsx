@@ -1,5 +1,7 @@
+import { useMemo } from "react";
 import type { GameAnalysis, MoveClassification } from "@/lib/chess-api";
 import { CLASSIFICATION_META } from "./ClassificationBadge";
+import { MoveEvaluationSymbol } from "./MoveEvaluationSymbol";
 import { cn } from "@/lib/utils";
 
 const ORDER: MoveClassification[] = [
@@ -7,11 +9,12 @@ const ORDER: MoveClassification[] = [
   "brilliant",
   "great",
   "best",
+  "excellent",
   "good",
   "inaccuracy",
   "mistake",
   "blunder",
-  "missed_win",
+  "miss",
 ];
 
 function AccuracyRow({ label, value, dark }: { label: string; value: number; dark?: boolean }) {
@@ -36,11 +39,18 @@ function AccuracyRow({ label, value, dark }: { label: string; value: number; dar
 }
 
 export function GameSummary({ analysis }: { analysis: GameAnalysis }) {
-  const counts = ORDER.map((key) => ({
-    key,
-    white: analysis.moves.filter((m) => m.color === "w" && m.classification === key).length,
-    black: analysis.moves.filter((m) => m.color === "b" && m.classification === key).length,
-  })).filter((row) => row.white + row.black > 0);
+  const counts = useMemo(() => {
+    const totals = new Map<MoveClassification, { white: number; black: number }>();
+    for (const move of analysis.moves) {
+      const count = totals.get(move.classification) ?? { white: 0, black: 0 };
+      count[move.color === "w" ? "white" : "black"] += 1;
+      totals.set(move.classification, count);
+    }
+    return ORDER.flatMap((key) => {
+      const count = totals.get(key);
+      return count ? [{ key, ...count }] : [];
+    });
+  }, [analysis.moves]);
 
   return (
     <div className="panel space-y-4 p-4">
@@ -55,10 +65,12 @@ export function GameSummary({ analysis }: { analysis: GameAnalysis }) {
         <div className="space-y-1.5 border-t border-border pt-3">
           {counts.map((row) => {
             const meta = CLASSIFICATION_META[row.key];
-            const Icon = meta.icon;
             return (
               <div key={row.key} className="flex items-center gap-2 text-xs">
-                <Icon className={cn("size-3.5 shrink-0", meta.text)} strokeWidth={2.5} />
+                <MoveEvaluationSymbol
+                  classification={row.key}
+                  className={cn("size-3.5 shrink-0", meta.text)}
+                />
                 <span className={cn("min-w-0 flex-1 truncate font-medium", meta.text)}>
                   {meta.label}
                 </span>
