@@ -3,8 +3,11 @@ from __future__ import annotations
 import io
 import math
 import os
+import re
+import stat
 import shutil
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -230,7 +233,7 @@ MAX_PGN_CHARACTERS = 1_000_000
 MAX_GAME_PLIES = 500
 MATE_SCORE = 20.0
 OPENING_BOOK_MAX_FULLMOVE = 10
-BRILLIANT_MIN_SACRIFICE_CP = 300.0
+BRILLIANT_MIN_SACRIFICE_CP = 200.0
 OPENING_BOOK_LINES = (
     "e4 e5 Nf3 Nc6 Bb5 a6 Ba4 Nf6 O-O Be7",
     "e4 e5 Nf3 Nc6 Bc4 Bc5 c3 Nf6 d3 d6",
@@ -261,12 +264,185 @@ def _build_opening_book() -> dict[int, set[chess.Move]]:
 OPENING_BOOK = _build_opening_book()
 
 
+def _strip_pgn_variations_and_comments(pgn: str) -> str:
+    output: list[str] = []
+    variation_depth = 0
+    brace_depth = 0
+    in_header = False
+    in_header_string = False
+    escaped = False
+    semicolon_comment = False
+    line_start = True
+
+    index = 0
+    while index < len(pgn):
+        char = pgn[index]
+        if semicolon_comment:
+            if char == "\n":
+                semicolon_comment = False
+                output.append(char)
+                line_start = True
+            index += 1
+            continue
+        if brace_depth:
+            if char == "{":
+                brace_depth += 1
+            elif char == "}":
+                brace_depth -= 1
+                if not brace_depth:
+                    output.append(" ")
+            index += 1
+            continue
+        if variation_depth:
+            if char == "{":
+                brace_depth = 1
+            elif char == "(":
+                variation_depth += 1
+            elif char == ")":
+                variation_depth -= 1
+                if not variation_depth:
+                    output.append(" ")
+            elif char == ";":
+                semicolon_comment = True
+            index += 1
+            continue
+
+        if in_header:
+            output.append(char)
+            if in_header_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_header_string = False
+            elif char == '"':
+                in_header_string = True
+            elif char == "]":
+                in_header = False
+            if char == "\n":
+                line_start = True
+            index += 1
+            continue
+
+        if line_start and char.isspace() and char != "\n":
+            output.append(char)
+            index += 1
+            continue
+        if line_start and char == "[":
+            output.append(char)
+            in_header = True
+            line_start = False
+            index += 1
+            continue
+        if char == "\n":
+            output.append(char)
+            line_start = True
+            index += 1
+        elif char.isspace():
+            output.append(char)
+            index += 1
+        elif char == "{":
+            clock_match = re.match(
+                r"\{\s*\[%clk\s+([0-9:.]+)\]\s*\}",
+                pgn[index:],
+            )
+            if clock_match:
+                output.append(f" {{[%clk {clock_match.group(1)}]}} ")
+                index += clock_match.end()
+            else:
+                brace_depth = 1
+                output.append(" ")
+                index += 1
+            line_start = False
+        elif char == ";":
+            semicolon_comment = True
+            line_start = False
+            output.append(" ")
+            index += 1
+        elif char == "(":
+            variation_depth = 1
+            line_start = False
+            output.append(" ")
+            index += 1
+        elif char == ")":
+            raise AnalysisError("Invalid PGN variation syntax.")
+        else:
+            output.append(char)
+            line_start = False
+            index += 1
+
+    if brace_depth or variation_depth or in_header or in_header_string:
+        raise AnalysisError("Invalid PGN comment, variation, or header syntax.")
+    return "".join(output)
+
+
+def _game_outcome(board: chess.Board) -> chess.Outcome | None:
+    return board.outcome(claim_draw=True)
+
+
+def _validate_mainline_size(pgn: str) -> None:
+    move_count = 0
+    endings = {"1-0", "0-1", "1/2-1/2", "*"}
+    for line in pgn.splitlines():
+        if line.lstrip().startswith("["):
+            continue
+        line = re.sub(r"\{\[%clk\s+[0-9:.]+\]\}", " ", line)
+        for match in re.finditer(r"\S+", line):
+            token = match.group()
+            if (
+                re.fullmatch(r"\d+\.{1,3}", token)
+                or token in endings
+                or token.startswith("$")
+                or token.lower() in {"e.p.", "ep"}
+                or re.fullmatch(r"[!?]+", token)
+            ):
+                continue
+            move_count += 1
+            if move_count > MAX_GAME_PLIES:
+                raise AnalysisError(f"Games are limited to {MAX_GAME_PLIES} plies.")
+
+
+def _termination_name(termination: chess.Termination) -> str:
+    return {
+        chess.Termination.CHECKMATE: "checkmate",
+        chess.Termination.STALEMATE: "stalemate",
+        chess.Termination.INSUFFICIENT_MATERIAL: "insufficient material",
+        chess.Termination.SEVENTYFIVE_MOVES: "75-move rule",
+        chess.Termination.FIVEFOLD_REPETITION: "fivefold repetition",
+        chess.Termination.FIFTY_MOVES: "50-move rule",
+        chess.Termination.THREEFOLD_REPETITION: "threefold repetition",
+    }.get(termination, "draw")
+
+
+def _termination_data(outcome: chess.Outcome) -> dict[str, Any]:
+    return {
+        "result": outcome.result(),
+        "reason": _termination_name(outcome.termination),
+        "winner": "w" if outcome.winner == chess.WHITE else "b" if outcome.winner == chess.BLACK else None,
+    }
+
+
+def _terminal_score(outcome: chess.Outcome) -> chess.engine.PovScore:
+    if outcome.winner is None:
+        return chess.engine.PovScore(chess.engine.Cp(0), chess.WHITE)
+    return chess.engine.PovScore(chess.engine.Mate(1), outcome.winner)
+
+
 class AnalysisError(ValueError):
     """A user-supplied game cannot be analyzed."""
 
 
 class AnalysisBusyError(RuntimeError):
     """The local engine is already analyzing another game."""
+
+
+class AnalysisTimeoutError(AnalysisError):
+    """The analysis exceeded its configured wall-clock deadline."""
+
+
+class EngineUnavailableError(RuntimeError):
+    """Stockfish did not recover after an engine protocol failure."""
 
 
 @dataclass(frozen=True)
@@ -276,6 +452,8 @@ class EngineSettings:
     threads: int = 2
     hash_mb: int = 256
     timeout_seconds: float = 30.0
+    move_time_seconds: float = 0.75
+    game_timeout_seconds: float = 90.0
 
 
 class ChessAnalyzer:
@@ -285,13 +463,14 @@ class ChessAnalyzer:
         self.settings = settings
         self._engine: chess.engine.SimpleEngine | None = None
         self._lock = threading.Lock()
+        self._analysis_deadline = 0.0
 
     def start(self) -> None:
-        if self._engine is not None:
-            return
+        if self._engine is None:
+            self._spawn_engine()
 
+    def _spawn_engine(self) -> None:
         executable_path = _resolve_engine_path(self.settings.path)
-
         engine: chess.engine.SimpleEngine | None = None
         try:
             engine = chess.engine.SimpleEngine.popen_uci(
@@ -305,30 +484,65 @@ class ChessAnalyzer:
                 options["Hash"] = self.settings.hash_mb
             if options:
                 engine.configure(options)
+            engine.ping()
             self._engine = engine
-        except (OSError, chess.engine.EngineError, chess.engine.EngineTerminatedError) as exc:
+        except (
+            OSError,
+            TimeoutError,
+            chess.engine.EngineError,
+            chess.engine.EngineTerminatedError,
+        ) as exc:
             if engine is not None:
                 try:
                     engine.quit()
-                except (OSError, chess.engine.EngineError, chess.engine.EngineTerminatedError):
+                except (OSError, TimeoutError, chess.engine.EngineError):
                     pass
-            raise RuntimeError(
-                f"Could not start Stockfish executable at {executable_path!r}: {exc}"
-            ) from exc
+            self._engine = None
+            raise RuntimeError("Stockfish failed to start or respond to its health check.") from exc
+
+    def _restart_engine(self) -> None:
+        engine, self._engine = self._engine, None
+        if engine is not None:
+            try:
+                engine.quit()
+            except (OSError, chess.engine.EngineError):
+                pass
+        self._spawn_engine()
+
+    def health_check(self) -> bool:
+        if not self._lock.acquire(blocking=False):
+            return self._engine is not None
+        try:
+            if self._engine is None:
+                self._restart_engine()
+            try:
+                self._engine.ping()
+            except (
+                OSError,
+                TimeoutError,
+                chess.engine.EngineError,
+                chess.engine.EngineTerminatedError,
+            ):
+                self._restart_engine()
+            return self._engine is not None
+        finally:
+            self._lock.release()
 
     def close(self) -> None:
         if self._engine is not None:
-            self._engine.quit()
-            self._engine = None
+            engine, self._engine = self._engine, None
+            try:
+                engine.quit()
+            except (OSError, TimeoutError, chess.engine.EngineError):
+                pass
 
     def analyze(self, raw_input: str, depth: int | None = None) -> dict[str, Any]:
         if len(raw_input) > MAX_PGN_CHARACTERS:
             raise AnalysisError("Input exceeds the 1 MB limit.")
+        if "\x00" in raw_input:
+            raise AnalysisError("Input cannot contain null bytes.")
         if not raw_input.strip():
             raise AnalysisError("Provide a PGN game or FEN position.")
-        if self._engine is None:
-            raise RuntimeError("Stockfish is not running.")
-
         selected_depth = self.settings.depth if depth is None else depth
         if not 10 <= selected_depth <= 20:
             raise AnalysisError("Analysis depth must be between 10 and 20.")
@@ -336,6 +550,7 @@ class ChessAnalyzer:
         if not self._lock.acquire(blocking=False):
             raise AnalysisBusyError("The analysis engine is busy. Try again shortly.")
         try:
+            self._analysis_deadline = time.monotonic() + self.settings.game_timeout_seconds
             fen_analysis = self._analyze_fen(raw_input.strip(), selected_depth)
             if fen_analysis is not None:
                 return fen_analysis
@@ -352,6 +567,22 @@ class ChessAnalyzer:
             return None
         if not board.is_valid():
             raise AnalysisError("Invalid FEN position.")
+        outcome = _game_outcome(board)
+        if outcome is not None:
+            score = _terminal_score(outcome).pov(chess.WHITE)
+            evaluation = _score_to_pawns(score)
+            return {
+                "metadata": {"white": "White", "black": "Black", "result": outcome.result()},
+                "headers": {},
+                "start_fen": board.fen(),
+                "moves": [],
+                "white_accuracy": 100.0,
+                "black_accuracy": 100.0,
+                "summary": f"Terminal position: {_termination_name(outcome.termination)}.",
+                "final_score": _score_to_json(score),
+                "final_evaluation": evaluation,
+                "termination": _termination_data(outcome),
+            }
         score = self._engine_score(board, depth).pov(chess.WHITE)
         evaluation = _score_to_pawns(score)
         return {
@@ -364,30 +595,58 @@ class ChessAnalyzer:
             "summary": f"Static FEN position. Stockfish evaluates it at {_format_eval(evaluation)}.",
             "final_score": _score_to_json(score),
             "final_evaluation": evaluation,
+            "termination": None,
         }
 
     def _analyze_pgn(self, raw_input: str, depth: int) -> dict[str, Any]:
-        game = chess.pgn.read_game(io.StringIO(raw_input))
+        sanitized = _strip_pgn_variations_and_comments(raw_input)
+        _validate_mainline_size(sanitized)
+        game = chess.pgn.read_game(io.StringIO(sanitized))
         if game is None:
             raise AnalysisError("Could not parse a PGN game. Check the headers and move list.")
         if game.errors:
-            details = str(game.errors[0])
-            raise AnalysisError(f"Invalid PGN: {details[:240]}")
+            raise AnalysisError("Invalid PGN move or header syntax.")
 
-        san_moves = list(game.mainline_moves())
-        if not san_moves:
-            raise AnalysisError("No moves found in the PGN game.")
+        mainline_nodes = list(game.mainline())
+        san_moves = [node.move for node in mainline_nodes]
         if len(san_moves) > MAX_GAME_PLIES:
             raise AnalysisError(f"Games are limited to {MAX_GAME_PLIES} plies.")
 
         headers = dict(game.headers)
         board = game.board()
+        if not board.is_valid():
+            raise AnalysisError("PGN starts from an invalid FEN position.")
+        if not san_moves:
+            outcome = _game_outcome(board)
+            if outcome is None:
+                raise AnalysisError("No moves found in the PGN game.")
+            score = _terminal_score(outcome).pov(chess.WHITE)
+            return {
+                "metadata": {
+                    "white": headers.get("White", "White"),
+                    "black": headers.get("Black", "Black"),
+                    "result": outcome.result(),
+                },
+                "headers": headers,
+                "start_fen": board.fen(),
+                "moves": [],
+                "white_accuracy": 100.0,
+                "black_accuracy": 100.0,
+                "summary": f"Terminal position: {_termination_name(outcome.termination)}.",
+                "final_score": _score_to_json(score),
+                "final_evaluation": _score_to_pawns(score),
+                "termination": _termination_data(outcome),
+            }
         start_fen = board.fen()
         analyzed_moves: list[dict[str, Any]] = []
         white_losses: list[float] = []
         black_losses: list[float] = []
+        termination: dict[str, Any] | None = None
 
-        for ply, move in enumerate(san_moves):
+        for ply, (move, node) in enumerate(zip(san_moves, mainline_nodes, strict=True)):
+            outcome = _game_outcome(board)
+            if outcome is not None:
+                raise AnalysisError("PGN contains moves after the game has ended.")
             fen_before = board.fen()
             mover = board.turn
             san = board.san(move)
@@ -408,12 +667,19 @@ class ChessAnalyzer:
                 best_move = move
                 classification = "book"
                 board.push(move)
+                outcome = _game_outcome(board)
+                if outcome is not None:
+                    after_white_score = _terminal_score(outcome).pov(chess.WHITE)
+                    after_eval = _score_to_pawns(after_white_score)
+                    termination = _termination_data(outcome)
             else:
                 multipv_info = self._engine_analyze(board, depth, multipv=2)
                 best_info = multipv_info[0]
                 best_move = best_info.get("pv", [None])[0]
                 if best_move is None:
-                    raise RuntimeError("Stockfish did not return a principal variation.")
+                    raise EngineUnavailableError(
+                        "Stockfish did not return a principal variation."
+                    )
 
                 second_best_wdl_drop = 0.0
                 if len(multipv_info) > 1:
@@ -424,16 +690,21 @@ class ChessAnalyzer:
 
                 best_score = best_info["score"].pov(mover).score(mate_score=100_000)
                 if best_score is None:
-                    raise RuntimeError("Stockfish returned an unscorable position.")
+                    raise EngineUnavailableError("Stockfish returned an unscorable position.")
 
                 before_white_score = best_info["score"].pov(chess.WHITE)
                 before_eval = _score_to_pawns(before_white_score)
                 board.push(move)
-                after_info = self._engine_analyze(board, depth)[0]
+                outcome = _game_outcome(board)
+                if outcome is not None:
+                    after_info = {"score": _terminal_score(outcome), "pv": []}
+                    termination = _termination_data(outcome)
+                else:
+                    after_info = self._engine_analyze(board, depth)[0]
                 actual_score_obj = after_info["score"].pov(mover)
                 actual_score = actual_score_obj.score(mate_score=100_000)
                 if actual_score is None:
-                    raise RuntimeError("Stockfish returned an unscorable position.")
+                    raise EngineUnavailableError("Stockfish returned an unscorable position.")
 
                 centipawn_loss = max(0.0, float(best_score - actual_score))
                 loss = centipawn_loss / 100.0
@@ -441,7 +712,8 @@ class ChessAnalyzer:
                 after_eval = _score_to_pawns(after_white_score)
                 gain = (after_eval - before_eval) * (1 if mover == chess.WHITE else -1)
                 reply_board = board.copy()
-                opponent_reply = after_info.get("pv", [None])[0]
+                after_pv = after_info.get("pv", [])
+                opponent_reply = after_pv[0] if after_pv else None
                 if opponent_reply is not None and opponent_reply in reply_board.legal_moves:
                     reply_board.push(opponent_reply)
                 material_sacrifice = (
@@ -478,6 +750,7 @@ class ChessAnalyzer:
             category = _normalize_category(classification)
 
             best_move_san = chess.Board(fen_before).san(best_move)
+            clock_match = re.search(r"\[%clk\s+([0-9:.]+)\]", node.comment)
             feedback, suggestion = _move_feedback(
                 classification=category,
                 san=san,
@@ -520,6 +793,7 @@ class ChessAnalyzer:
                     "from": chess.square_name(move.from_square),
                     "to": chess.square_name(move.to_square),
                     "fen_before": fen_before,
+                    "best_move": {"san": best_move_san, "uci": best_move.uci()},
                     "fen_after": fen_after,
                     "evaluation_before": before_eval,
                     "evaluation": after_eval,
@@ -533,7 +807,8 @@ class ChessAnalyzer:
                     "explanation": feedback,
                     "suggestion": suggestion,
                     "win_prob_delta": round(win_prob_delta, 4),
-                    "best_move": {
+                    "clock": clock_match.group(1) if clock_match else None,
+                    "best_move_hint": {
                         "san": best_move_san,
                         "uci": best_move.uci(),
                     },
@@ -550,6 +825,10 @@ class ChessAnalyzer:
         black_accuracy = _accuracy(black_losses)
         final_score = analyzed_moves[-1]["score_after"]
         final_eval = analyzed_moves[-1]["evaluation"]
+        if termination is None:
+            final_outcome = _game_outcome(board)
+            if final_outcome is not None:
+                termination = _termination_data(final_outcome)
         leader = "White" if final_eval > 0.6 else "Black" if final_eval < -0.6 else None
         summary = (
             f"{leader} finished with a Stockfish evaluation of {_format_eval(final_eval)}."
@@ -561,7 +840,7 @@ class ChessAnalyzer:
             "metadata": {
                 "white": headers.get("White", "White"),
                 "black": headers.get("Black", "Black"),
-                "result": headers.get("Result", "*"),
+                "result": termination["result"] if termination else headers.get("Result", "*"),
             },
             "headers": headers,
             "start_fen": start_fen,
@@ -571,6 +850,7 @@ class ChessAnalyzer:
             "summary": summary,
             "final_score": final_score,
             "final_evaluation": final_eval,
+            "termination": termination,
         }
 
     def _engine_analyze(
@@ -579,12 +859,50 @@ class ChessAnalyzer:
         depth: int,
         multipv: int = 1,
     ) -> list[dict[str, Any]]:
-        result = self._engine.analyse(
-            board,
-            chess.engine.Limit(depth=depth),
-            multipv=multipv,
-        )
-        return result if isinstance(result, list) else [result]
+        if self._analysis_deadline <= 0:
+            self._analysis_deadline = time.monotonic() + self.settings.game_timeout_seconds
+        remaining = self._analysis_deadline - time.monotonic()
+        if remaining <= 0:
+            raise AnalysisTimeoutError("Game analysis exceeded its time limit.")
+        if self._engine is None:
+            try:
+                self._restart_engine()
+            except Exception as exc:
+                raise EngineUnavailableError(
+                    "Stockfish is unavailable for analysis."
+                ) from exc
+        limit = min(0.75, self.settings.move_time_seconds, remaining)
+        try:
+            result = self._engine.analyse(
+                board,
+                chess.engine.Limit(depth=depth, time=limit),
+                multipv=multipv,
+            )
+        except (
+            OSError,
+            TimeoutError,
+            chess.engine.EngineError,
+            chess.engine.EngineTerminatedError,
+        ) as exc:
+            try:
+                self._restart_engine()
+            except Exception as recovery_error:
+                raise EngineUnavailableError(
+                    "Stockfish could not recover from an analysis failure."
+                ) from recovery_error
+            raise AnalysisError("Stockfish failed during analysis; please retry.") from exc
+        if time.monotonic() > self._analysis_deadline:
+            try:
+                self._restart_engine()
+            except Exception as recovery_error:
+                raise EngineUnavailableError(
+                    "Stockfish could not recover after exceeding its time limit."
+                ) from recovery_error
+            raise AnalysisTimeoutError("Game analysis exceeded its time limit.")
+        infos = result if isinstance(result, list) else [result]
+        if not infos or any("score" not in info for info in infos):
+            raise EngineUnavailableError("Stockfish returned incomplete analysis data.")
+        return infos
 
     def _engine_score(self, board: chess.Board, depth: int) -> chess.engine.Score:
         return self._engine_analyze(board, depth)[0]["score"]
@@ -631,24 +949,43 @@ def _format_eval(value: float) -> str:
 def _resolve_engine_path(configured_path: str) -> str:
     candidate = Path(configured_path).expanduser()
 
-    if candidate.is_absolute() or candidate.parent != Path("."):
-        if candidate.is_file():
-            return str(candidate.resolve())
+    if candidate.is_absolute():
+        executable = candidate
+    elif candidate.parent != Path("."):
         raise FileNotFoundError(
-            f"Stockfish executable {str(candidate)!r} does not exist. "
-            "Check STOCKFISH_PATH."
+            "STOCKFISH_PATH must be an absolute path when it includes a directory."
         )
+    else:
+        trusted_entries: list[str] = []
+        current_directory = Path.cwd().resolve()
+        for entry in os.getenv("PATH", "").split(os.pathsep):
+            if not entry:
+                continue
+            try:
+                if Path(entry).resolve() == current_directory:
+                    continue
+            except OSError:
+                continue
+            trusted_entries.append(entry)
+        path_candidate = shutil.which(
+            configured_path,
+            path=os.pathsep.join(trusted_entries),
+        )
+        if path_candidate is None:
+            raise FileNotFoundError(
+                "Stockfish was not found on PATH. Set STOCKFISH_PATH to an absolute executable path."
+            )
+        executable = Path(path_candidate)
 
-    local_candidate = Path.cwd() / candidate
-    if local_candidate.is_file():
-        return str(local_candidate.resolve())
-
-    path_candidate = shutil.which(configured_path)
-    if path_candidate:
-        return str(Path(path_candidate).resolve())
-
-    raise FileNotFoundError(
-        f"Stockfish executable {configured_path!r} was not found in the current "
-        f"directory ({Path.cwd()}) or on PATH. Place it in the current directory "
-        "or set STOCKFISH_PATH to its full path."
-    )
+    try:
+        resolved = executable.resolve(strict=True)
+        metadata = resolved.stat()
+    except OSError as exc:
+        raise FileNotFoundError(
+            "Stockfish executable could not be resolved; configure STOCKFISH_PATH."
+        ) from exc
+    if not stat.S_ISREG(metadata.st_mode) or not os.access(resolved, os.X_OK):
+        raise FileNotFoundError(
+            "STOCKFISH_PATH must identify an executable regular file."
+        )
+    return str(resolved)

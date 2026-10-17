@@ -65,6 +65,19 @@ Prefer working locally? You need Node.js and npm — [install with nvm](https://
 ```sh
 git clone <this-repository-url>
 cd <repository-name>
+cd frontend
 npm i
 npm run dev
 ```
+
+Copy `frontend/.env.example` to `frontend/.env.local` and set the Supabase
+publishable/anonymous key locally. The frontend tolerates missing Supabase
+configuration; Supabase Auth features require a signed-in session. Never place a
+service-role key or JWT signing secret in a `VITE_*` variable.
+
+The import screen supports pasted PGN/FEN, PGN/FEN/TXT uploads up to 1 MB, and
+Stockfish depth 10-20. Review includes move playback, board flipping (`F` key), legal
+variation testing, clock annotations, terminal reasons, and a white-centric
+evaluation graph. Live-game API helpers authenticate using the current Supabase Auth
+session; the backend game contract and Redis setup are documented in
+`../backend/README.md`.

@@ -2,7 +2,7 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { Crown, Sparkles, ArrowRight, AlertCircle, FileText } from "lucide-react";
 import { AnalysisBoard } from "@/components/chess/AnalysisBoard";
-import { analyzePgn, ANALYSIS_STORAGE_KEY, SAMPLE_PGN } from "@/lib/chess-api";
+import { analyzePgn, analyzePgnFile, ANALYSIS_STORAGE_KEY, SAMPLE_PGN } from "@/lib/chess-api";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -36,13 +36,17 @@ function Home() {
   const [input, setInput] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [depth, setDepth] = useState(15);
 
   const handleAnalyze = async () => {
-    if (!input.trim() || isAnalyzing) return;
+    if ((!input.trim() && !selectedFile) || isAnalyzing) return;
     setIsAnalyzing(true);
     setError(null);
     try {
-      const analysis = await analyzePgn(input.trim());
+      const analysis = selectedFile
+        ? await analyzePgnFile(selectedFile, depth)
+        : await analyzePgn(input.trim(), depth);
       sessionStorage.setItem(ANALYSIS_STORAGE_KEY, JSON.stringify(analysis));
       navigate({ to: "/review" });
     } catch (cause) {
@@ -92,12 +96,54 @@ function Home() {
               value={input}
               onChange={(e) => {
                 setInput(e.target.value);
+                setSelectedFile(null);
                 setError(null);
               }}
               spellCheck={false}
               placeholder={PLACEHOLDER}
               className="scroll-slim mt-4 h-56 w-full resize-none rounded-lg border border-input bg-background/60 p-3 font-mono text-sm leading-relaxed text-foreground outline-none transition-colors placeholder:text-muted-foreground/70 focus:border-accent focus:ring-2 focus:ring-ring/40"
             />
+
+            <div className="mt-3 grid gap-3 sm:grid-cols-2">
+              <label className="grid gap-1 text-sm">
+                <span className="font-medium">Stockfish depth</span>
+                <select
+                  value={depth}
+                  onChange={(event) => setDepth(Number(event.target.value))}
+                  className="h-10 rounded-md border border-input bg-background px-3"
+                >
+                  {Array.from({ length: 11 }, (_, index) => index + 10).map((value) => (
+                    <option key={value} value={value}>
+                      Depth {value}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="grid gap-1 text-sm">
+                <span className="font-medium">Upload PGN, FEN, or TXT</span>
+                <input
+                  type="file"
+                  accept=".pgn,.fen,.txt,text/plain,application/x-chess-pgn"
+                  onChange={(event) => {
+                    const file = event.currentTarget.files?.[0] ?? null;
+                    setError(null);
+                    if (file && (!/\.(pgn|fen|txt)$/i.test(file.name) || file.size > 1_000_000)) {
+                      setSelectedFile(null);
+                      setError("Choose a PGN, FEN, or TXT file no larger than 1 MB.");
+                      event.currentTarget.value = "";
+                      return;
+                    }
+                    setSelectedFile(file);
+                  }}
+                  className="h-10 w-full rounded-md border border-input bg-background px-2 py-1 text-xs file:mr-2 file:rounded file:border-0 file:bg-secondary file:px-2 file:py-1"
+                />
+                {selectedFile && (
+                  <span className="truncate text-xs text-muted-foreground">
+                    {selectedFile.name}
+                  </span>
+                )}
+              </label>
+            </div>
 
             {error && (
               <p className="mt-3 flex items-start gap-2 rounded-md bg-destructive/12 px-3 py-2 text-sm text-destructive">
@@ -110,7 +156,7 @@ function Home() {
               <button
                 type="button"
                 onClick={handleAnalyze}
-                disabled={isAnalyzing || !input.trim()}
+                disabled={isAnalyzing || (!input.trim() && !selectedFile)}
                 className="inline-flex flex-1 items-center justify-center gap-2 rounded-lg bg-primary px-5 py-3 text-sm font-semibold text-primary-foreground shadow-[var(--glow-accent)] transition-all hover:brightness-110 active:scale-[0.99]"
               >
                 {isAnalyzing ? "Analyzing..." : "Analyze Game"}
@@ -120,6 +166,7 @@ function Home() {
                 type="button"
                 onClick={() => {
                   setInput(SAMPLE_PGN);
+                  setSelectedFile(null);
                   setError(null);
                 }}
                 className="inline-flex items-center justify-center gap-2 rounded-lg border border-border bg-secondary px-5 py-3 text-sm font-semibold transition-colors hover:border-accent hover:text-accent"

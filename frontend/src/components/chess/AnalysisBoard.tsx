@@ -8,6 +8,9 @@ interface AnalysisBoardProps {
   lastMove?: { from: string; to: string } | undefined;
   classification?: MoveClassification | undefined;
   animate?: boolean | undefined;
+  interactive?: boolean | undefined;
+  boardOrientation?: "white" | "black" | undefined;
+  onMove?: ((from: string, to: string) => boolean) | undefined;
   id: string;
 }
 
@@ -16,6 +19,9 @@ export const AnalysisBoard = memo(function AnalysisBoard({
   lastMove,
   classification,
   animate = true,
+  interactive = false,
+  boardOrientation = "white",
+  onMove,
   id,
 }: AnalysisBoardProps) {
   const [mounted, setMounted] = useState(false);
@@ -41,7 +47,14 @@ export const AnalysisBoard = memo(function AnalysisBoard({
         options={{
           id,
           position,
-          allowDragging: false,
+          boardOrientation,
+          allowDragging: interactive,
+          ...(interactive
+            ? {
+                onPieceDrop: ({ sourceSquare, targetSquare }) =>
+                  targetSquare !== null && (onMove?.(sourceSquare, targetSquare) ?? false),
+              }
+            : {}),
           animationDurationInMs: animate ? 200 : 0,
           showNotation: true,
           boardStyle: { width: "100%" },

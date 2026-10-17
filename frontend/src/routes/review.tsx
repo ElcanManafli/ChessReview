@@ -1,7 +1,9 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Chess } from "chess.js";
 import { ArrowLeft, LineChart, ListOrdered, Trophy } from "lucide-react";
 import { AnalysisBoard } from "@/components/chess/AnalysisBoard";
+import { EvaluationAdvantageGraph } from "@/components/chess/EvaluationAdvantageGraph";
 import { EvaluationBar } from "@/components/chess/EvaluationBar";
 import { MoveList } from "@/components/chess/MoveList";
 import { PlaybackControls } from "@/components/chess/PlaybackControls";
@@ -10,6 +12,7 @@ import { MoveEvaluationSymbol } from "@/components/chess/MoveEvaluationSymbol";
 import {
   ANALYSIS_STORAGE_KEY,
   normalizeMoveClassification,
+  parseSafeJson,
   type GameAnalysis,
 } from "@/lib/chess-api";
 import { cn } from "@/lib/utils";
@@ -48,24 +51,52 @@ function ReviewPage() {
   const [activeIndex, setActiveIndex] = useState(-1);
   const [isPlaying, setIsPlaying] = useState(false);
   const [tab, setTab] = useState<TabKey>("moves");
+  const [boardOrientation, setBoardOrientation] = useState<"white" | "black">("white");
+  const [testingVariation, setTestingVariation] = useState(false);
+  const [variationFen, setVariationFen] = useState<string | null>(null);
+  const [variationMoves, setVariationMoves] = useState<string[]>([]);
 
   useEffect(() => {
-    const stored = sessionStorage.getItem(ANALYSIS_STORAGE_KEY);
-    if (!stored) return;
     try {
-      const savedAnalysis = JSON.parse(stored) as GameAnalysis;
+      const stored = sessionStorage.getItem(ANALYSIS_STORAGE_KEY);
+      if (!stored) return;
+      const parsed = parseSafeJson(stored);
+      if (
+        typeof parsed !== "object" ||
+        parsed === null ||
+        !("moves" in parsed) ||
+        !Array.isArray(parsed.moves)
+      ) {
+        throw new Error("Invalid saved analysis.");
+      }
+      const savedAnalysis = parsed as GameAnalysis;
       setAnalysis({
         ...savedAnalysis,
         moves: savedAnalysis.moves.map((move) => ({
           ...move,
+          fenBefore: typeof move.fenBefore === "string" ? move.fenBefore : null,
+          bestMove:
+            move.bestMove &&
+            typeof move.bestMove.san === "string" &&
+            typeof move.bestMove.uci === "string"
+              ? move.bestMove
+              : null,
+          centipawnLoss: Number.isFinite(move.centipawnLoss) ? move.centipawnLoss : 0,
+          winProbDelta: Number.isFinite(move.winProbDelta) ? move.winProbDelta : 0,
+          clock: typeof move.clock === "string" ? move.clock : null,
           classification: normalizeMoveClassification(move.classification),
           explanation: typeof move.explanation === "string" ? move.explanation : null,
           suggestion: typeof move.suggestion === "string" ? move.suggestion : null,
         })),
+        termination: savedAnalysis.termination ?? null,
       });
       setActiveIndex(-1);
     } catch {
-      sessionStorage.removeItem(ANALYSIS_STORAGE_KEY);
+      try {
+        sessionStorage.removeItem(ANALYSIS_STORAGE_KEY);
+      } catch {
+        setAnalysis(null);
+      }
     }
   }, []);
 
@@ -103,14 +134,23 @@ function ReviewPage() {
         e.preventDefault();
         setIsPlaying(false);
         goPrev();
+      } else if (e.key.toLowerCase() === "f") {
+        setBoardOrientation((orientation) => (orientation === "white" ? "black" : "white"));
       }
     };
+
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [goNext, goPrev]);
 
   const current = activeIndex >= 0 ? moves[activeIndex] : undefined;
   const position = current?.fenAfter ?? startFen;
+  const variationPosition = testingVariation ? (variationFen ?? position) : position;
+
+  useEffect(() => {
+    setVariationFen(position);
+    setVariationMoves([]);
+  }, [position]);
   const evaluation = current?.evaluation ?? analysis?.finalEvaluation ?? 0;
 
   const label = useMemo(() => {
@@ -126,10 +166,26 @@ function ReviewPage() {
     setActiveIndex(index);
   };
 
+  const playVariationMove = (from: string, to: string): boolean => {
+    try {
+      const board = new Chess(variationFen ?? position);
+      const move = board.move({ from, to, promotion: "q" });
+      if (!move) return false;
+      setVariationFen(board.fen());
+      setVariationMoves((moves) => [...moves, move.san]);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
   const rightPanel = (
     <>
       <div className={cn(tab === "moves" ? "block" : "hidden", "lg:block")}>
         <MoveList moves={moves} activeIndex={activeIndex} onSelect={select} />
+      </div>
+      <div className="mt-6">
+        <EvaluationAdvantageGraph moves={moves} />
       </div>
       <div className={cn(tab === "engine" ? "block" : "hidden", "lg:block")}>
         <EvaluationBar
@@ -164,10 +220,55 @@ function ReviewPage() {
           <section className="mx-auto w-full max-w-[460px]">
             <AnalysisBoard
               id="review-board"
-              position={position}
+              position={variationPosition}
+              boardOrientation={boardOrientation}
+              interactive={testingVariation}
+              onMove={playVariationMove}
               lastMove={current ? { from: current.from, to: current.to } : undefined}
               classification={current?.classification}
             />
+
+            <div className="mt-3 flex flex-wrap justify-center gap-2">
+              <button
+                type="button"
+                onClick={() =>
+                  setBoardOrientation((orientation) =>
+                    orientation === "white" ? "black" : "white",
+                  )
+                }
+                className="rounded-md border border-border px-3 py-2 text-xs font-medium hover:border-accent"
+              >
+                Flip board (F)
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setTestingVariation((enabled) => !enabled);
+                  setVariationFen(position);
+                  setVariationMoves([]);
+                }}
+                className="rounded-md border border-border px-3 py-2 text-xs font-medium hover:border-accent"
+              >
+                {testingVariation ? "Stop testing" : "Test a variation"}
+              </button>
+              {testingVariation && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setVariationFen(position);
+                    setVariationMoves([]);
+                  }}
+                  className="rounded-md border border-border px-3 py-2 text-xs font-medium hover:border-accent"
+                >
+                  Reset variation
+                </button>
+              )}
+            </div>
+            {testingVariation && (
+              <p className="mt-2 text-center text-xs text-muted-foreground" aria-live="polite">
+                Practice line: {variationMoves.join(" ") || "drag a piece to try a legal move"}
+              </p>
+            )}
 
             <div className="mt-4 flex items-center justify-center gap-2">
               <span className="font-mono text-sm font-semibold">{label}</span>

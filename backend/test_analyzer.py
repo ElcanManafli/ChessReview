@@ -1,16 +1,24 @@
 import asyncio
+import time
 
 import chess
 import chess.engine
+import jwt
 import pytest
+from fastapi import HTTPException
 
+from backend import main as api
 from backend.analyzer import (
+    BRILLIANT_MIN_SACRIFICE_CP,
     AnalysisBusyError,
     AnalysisError,
     ChessAnalyzer,
     EngineSettings,
     classify_move,
     _move_feedback,
+    _game_outcome,
+    _resolve_engine_path,
+    _strip_pgn_variations_and_comments,
     move_symbol,
 )
 from backend.main import RequestBodyLimitMiddleware, _compact_analysis
@@ -188,8 +196,54 @@ def test_compact_analysis_keeps_only_fields_used_by_the_review_ui():
     assert compact["moves"][0]["fen_after"] == "after"
     assert compact["moves"][0]["explanation"] == "A safe move."
     assert compact["moves"][0]["suggestion"] == "Try d4."
-    assert "fen_before" not in compact["moves"][0]
-    assert "best_move" not in compact["moves"][0]
+    assert compact["moves"][0]["fen_before"] == "before"
+    assert compact["moves"][0]["best_move"] == result["moves"][0]["best_move"]
+
+
+def test_supabase_hs256_token_requires_standard_authenticated_claims(monkeypatch):
+    secret = "test-only-signing-secret-for-hs256"
+    issuer = "https://project.supabase.co/auth/v1"
+    monkeypatch.setattr(api, "supabase_url", "https://project.supabase.co")
+    monkeypatch.setattr(api, "jwks_client", None)
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", secret)
+
+    token = jwt.encode(
+        {
+            "sub": "user-123",
+            "iss": issuer,
+            "aud": "authenticated",
+            "exp": int(time.time()) + 60,
+            "role": "authenticated",
+        },
+        secret,
+        algorithm="HS256",
+    )
+    assert api._decode_user_token(token) == "user-123"
+
+    wrong_role = jwt.encode(
+        {
+            "sub": "user-123",
+            "iss": issuer,
+            "aud": "authenticated",
+            "exp": int(time.time()) + 60,
+            "role": "service_role",
+        },
+        secret,
+        algorithm="HS256",
+    )
+    with pytest.raises(HTTPException) as error:
+        api._decode_user_token(wrong_role)
+    assert error.value.status_code == 401
+
+
+def test_live_game_store_is_unavailable_when_redis_is_optional_and_offline(monkeypatch):
+    monkeypatch.setattr(api, "redis_available", False)
+    monkeypatch.setattr(api, "redis_client", None)
+    monkeypatch.setattr(api, "live_games", None)
+
+    with pytest.raises(HTTPException) as error:
+        api._require_game_store()
+    assert error.value.status_code == 503
 
 
 def test_classify_move_categories_and_symbols():
@@ -274,18 +328,18 @@ def test_classify_move_categories_and_symbols():
     assert classify_move(
         win_prob_delta=0.0,
         current_win_prob=0.6,
-        material_sacrifice_cp=299.0,
+        material_sacrifice_cp=200.0,
         eval_before=0.0,
         eval_after=2.0,
         is_tactical=True,
         is_book=False,
         is_best_move=True,
-    ) == "Best"
+    ) == "Brilliant"
 
     assert classify_move(
         win_prob_delta=0.0,
         current_win_prob=0.6,
-        material_sacrifice_cp=300.0,
+        material_sacrifice_cp=199.0,
         eval_before=0.0,
         eval_after=-0.25,
         is_tactical=True,
@@ -471,6 +525,137 @@ def test_move_feedback_explains_forced_mate_miss_and_blunder():
 
     assert "checkmate was available for you" in miss_explanation
     assert "checkmate for your opponent" in blunder_explanation
+
+
+def test_brilliant_threshold_is_exactly_two_hundred_centipawns():
+    assert BRILLIANT_MIN_SACRIFICE_CP == 200.0
+    assert classify_move(
+        win_prob_delta=0.0,
+        current_win_prob=0.6,
+        material_sacrifice_cp=200.0,
+        eval_before=0.0,
+        eval_after=0.0,
+        is_best_move=True,
+    ) == "Brilliant"
+
+
+def test_pgn_preprocessor_strips_nested_variations_and_keeps_clock_tags():
+    cleaned = _strip_pgn_variations_and_comments(
+        '[Event "Test"]\n1. e4 {main note} (1. d4 (1... Nf6)) e5 {[%clk 0:04:59]} ; tail\n'
+    )
+
+    assert "(1." not in cleaned
+    assert "main note" not in cleaned
+    assert "tail" not in cleaned
+    assert "1. e4" in cleaned and "e5" in cleaned
+    assert "[%clk 0:04:59]" in cleaned
+
+
+@pytest.mark.parametrize(
+    ("fen", "reason"),
+    [
+        ("rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3", "checkmate"),
+        ("7k/5Q2/6K1/8/8/8/8/8 b - - 0 1", "stalemate"),
+        ("8/8/8/8/8/8/4k3/6K1 w - - 0 1", "insufficient material"),
+        ("8/8/8/8/8/4k3/8/4K2R w - - 100 1", "50-move rule"),
+        ("8/8/8/8/8/4k3/8/4K2R w - - 150 1", "75-move rule"),
+    ],
+)
+def test_terminal_fen_skips_stockfish(fen, reason):
+    result = ChessAnalyzer(EngineSettings())._analyze_fen(fen, depth=15)
+    assert result is not None
+    assert result["termination"]["reason"] == reason
+
+
+def test_public_analysis_handles_terminal_fen_without_running_engine():
+    analyzer = ChessAnalyzer(EngineSettings())
+
+    result = analyzer.analyze("7k/5Q2/6K1/8/8/8/8/8 b - - 0 1")
+
+    assert result["termination"]["reason"] == "stalemate"
+
+
+def test_checkmating_pgn_move_skips_post_move_engine_analysis(monkeypatch):
+    analyzer = ChessAnalyzer(EngineSettings())
+    analyzer._engine = object()
+    best_move = chess.Move.from_uci("d8h4")
+    calls = []
+
+    def fake_analyze(board, depth, multipv=1):
+        calls.append(board.fen())
+        return [
+            {
+                "score": chess.engine.PovScore(chess.engine.Cp(0), chess.WHITE),
+                "pv": [best_move],
+            }
+        ]
+
+    monkeypatch.setattr(analyzer, "_engine_analyze", fake_analyze)
+    pgn = (
+        '[SetUp "1"]\n'
+        '[FEN "rnbqkbnr/pppp1ppp/8/4p3/6P1/5P2/PPPPP2P/RNBQKBNR b KQkq - 0 2"]\n\n'
+        "2... Qh4#"
+    )
+
+    result = analyzer.analyze(pgn)
+
+    assert len(calls) == 1
+    assert result["termination"]["reason"] == "checkmate"
+    assert result["final_evaluation"] <= -19.9
+
+
+def test_mainline_is_bounded_before_python_chess_builds_a_tree():
+    analyzer = ChessAnalyzer(EngineSettings())
+    excessive_game = " ".join(["1. e4"] * 501)
+    with pytest.raises(AnalysisError, match="500 plies"):
+        analyzer._analyze_pgn(excessive_game, depth=15)
+
+
+def test_terminal_pgn_without_moves_is_returned_without_engine_analysis():
+    pgn = (
+        '[SetUp "1"]\n'
+        '[FEN "rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3"]\n'
+        '[Result "*"]\n\n'
+    )
+    result = ChessAnalyzer(EngineSettings())._analyze_pgn(pgn, depth=15)
+
+    assert result["termination"]["reason"] == "checkmate"
+    assert result["metadata"]["result"] == "0-1"
+
+
+def test_pgn_clock_annotations_are_returned_with_move_metadata():
+    result = ChessAnalyzer(EngineSettings())._analyze_pgn(
+        "1. e4 {[%clk 0:04:58]}", depth=15
+    )
+
+    assert result["moves"][0]["clock"] == "0:04:58"
+    assert result["moves"][0]["fen_before"]
+    assert result["moves"][0]["best_move"] == {"san": "e4", "uci": "e2e4"}
+
+
+def test_automatic_fivefold_repetition_is_detected():
+    board = chess.Board()
+    cycle = ["g1f3", "g8f6", "f3g1", "f6g8"]
+    for _ in range(4):
+        for uci in cycle:
+            board.push_uci(uci)
+
+    outcome = _game_outcome(board)
+
+    assert outcome is not None
+    assert outcome.termination == chess.Termination.FIVEFOLD_REPETITION
+
+
+def test_engine_path_resolution_never_falls_back_to_current_directory(
+    tmp_path, monkeypatch
+):
+    local_engine = tmp_path / "stockfish-test"
+    local_engine.write_text("not an executable engine")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+    with pytest.raises(FileNotFoundError, match="PATH"):
+        _resolve_engine_path("stockfish-test")
 
 
 def test_black_brilliant_move_uses_mover_relative_evaluation(monkeypatch):

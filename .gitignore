@@ -3,3 +3,5 @@ node_modules/
 __pycache__/
 stockfish.exe
 .env
+.env.*
+!.env.example

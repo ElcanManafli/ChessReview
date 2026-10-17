@@ -92,6 +92,11 @@ export function GameSummary({ analysis }: { analysis: GameAnalysis }) {
       <p className="border-t border-border pt-3 text-sm leading-relaxed text-muted-foreground">
         {analysis.summary}
       </p>
+      {analysis.termination && (
+        <p className="text-xs font-medium text-muted-foreground">
+          Ended by {analysis.termination.reason} ({analysis.termination.result}).
+        </p>
+      )}
     </div>
   );
 }

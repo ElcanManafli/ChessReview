@@ -45,7 +45,7 @@ export function MoveList({ moves, activeIndex, onSelect }: MoveListProps) {
         type="button"
         onClick={() => onSelect(move.ply)}
         aria-label={`${move.san}, ${move.classification} move`}
-        title={`${move.san} — ${move.classification} move`}
+        title={`${move.san} — ${move.classification} move${move.clock ? ` — clock ${move.clock}` : ""}`}
         className={cn(
           "flex min-w-0 flex-1 items-center justify-between gap-1 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
           active

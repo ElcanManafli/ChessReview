@@ -40,7 +40,8 @@ const ChartContainer = React.forwardRef<
   }
 >(({ id, className, children, config, ...props }, ref) => {
   const uniqueId = React.useId();
-  const chartId = `chart-${id || uniqueId.replace(/:/g, "")}`;
+  const requestedId = typeof id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(id) ? id : "";
+  const chartId = `chart-${requestedId || uniqueId.replace(/:/g, "")}`;
 
   return (
     <ChartContext.Provider value={{ config }}>
@@ -62,33 +63,43 @@ const ChartContainer = React.forwardRef<
 ChartContainer.displayName = "Chart";
 
 const ChartStyle = ({ id, config }: { id: string; config: ChartConfig }) => {
-  const colorConfig = Object.entries(config).filter(([, config]) => config.theme || config.color);
+  const colorConfig = Object.entries(config).filter(
+    ([key, item]) =>
+      /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(key) &&
+      Boolean(item.theme || (item.color && isSafeCssColor(item.color))),
+  );
 
   if (!colorConfig.length) {
     return null;
   }
 
   return (
-    <style
-      dangerouslySetInnerHTML={{
-        __html: Object.entries(THEMES)
-          .map(
-            ([theme, prefix]) => `
+    <style>
+      {Object.entries(THEMES)
+        .map(
+          ([theme, prefix]) => `
 ${prefix} [data-chart=${id}] {
 ${colorConfig
   .map(([key, itemConfig]) => {
     const color = itemConfig.theme?.[theme as keyof typeof itemConfig.theme] || itemConfig.color;
-    return color ? `  --color-${key}: ${color};` : null;
+    return color && isSafeCssColor(color) ? `  --color-${key}: ${color};` : null;
   })
   .join("\n")}
 }
 `,
-          )
-          .join("\n"),
-      }}
-    />
+        )
+        .join("\n")}
+    </style>
   );
 };
+
+function isSafeCssColor(value: string): boolean {
+  return (
+    /^#[\da-f]{3,8}$/i.test(value) ||
+    /^[a-z]{1,24}$/i.test(value) ||
+    /^(?:rgb|rgba|hsl|hsla|oklch|oklab)\([\d\s.,%+\-/]+\)$/i.test(value)
+  );
+}
 
 const ChartTooltip = RechartsPrimitive.Tooltip;
 
@@ -308,17 +319,25 @@ function getPayloadConfigFromPayload(config: ChartConfig, payload: unknown, key:
 
   let configLabelKey: string = key;
 
-  if (key in payload && typeof payload[key as keyof typeof payload] === "string") {
+  if (Object.hasOwn(payload, key) && typeof payload[key as keyof typeof payload] === "string") {
     configLabelKey = payload[key as keyof typeof payload] as string;
   } else if (
     payloadPayload &&
-    key in payloadPayload &&
+    Object.hasOwn(payloadPayload, key) &&
     typeof payloadPayload[key as keyof typeof payloadPayload] === "string"
   ) {
     configLabelKey = payloadPayload[key as keyof typeof payloadPayload] as string;
   }
 
-  return configLabelKey in config ? config[configLabelKey] : config[key as keyof typeof config];
+  if (
+    !/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(configLabelKey) ||
+    configLabelKey === "constructor" ||
+    configLabelKey === "prototype" ||
+    configLabelKey === "__proto__"
+  ) {
+    return undefined;
+  }
+  return Object.hasOwn(config, configLabelKey) ? config[configLabelKey] : undefined;
 }
 
 export {
