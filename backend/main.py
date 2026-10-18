@@ -148,9 +148,9 @@ stockfish_path = os.getenv("STOCKFISH_PATH", "stockfish.exe" if os.name == "nt" 
 settings = EngineSettings(
     path=stockfish_path,
     depth=_positive_int("STOCKFISH_DEPTH", 15, 10, 20),
-    threads=_positive_int("STOCKFISH_THREADS", 2, 1, 64),
-    hash_mb=_positive_int("STOCKFISH_HASH_MB", 256, 16, 4096),
-    timeout_seconds=2.0,
+    threads=_positive_int("STOCKFISH_THREADS", 1, 1, 64),
+    hash_mb=_positive_int("STOCKFISH_HASH_MB", 16, 16, 4096),
+    timeout_seconds=30.0,
     move_time_seconds=0.75,
     game_timeout_seconds=90.0,
 )

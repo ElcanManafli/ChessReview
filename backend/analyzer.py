@@ -1,16 +1,23 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import math
 import os
+import platform
 import re
-import stat
 import shutil
+import stat
+import sys
+import tarfile
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 CLASSIFICATION_SYMBOLS: dict[str, str] = {
     "book": "📖",
@@ -34,6 +41,17 @@ CLASSIFICATION_SYMBOLS: dict[str, str] = {
     "Blunder": "??",
     "Miss": "❌",
 }
+
+_STOCKFISH_RELEASE_TAG = "sf_19"
+_STOCKFISH_ARCHIVE_URL = (
+    "https://github.com/official-stockfish/Stockfish/releases/download/"
+    f"{_STOCKFISH_RELEASE_TAG}/stockfish-linux-x86-64-universal.tar.gz"
+)
+_STOCKFISH_ARCHIVE_SHA256 = (
+    "9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f"
+)
+_MAX_STOCKFISH_ARCHIVE_BYTES = 100 * 1024 * 1024
+_MAX_STOCKFISH_BINARY_BYTES = 256 * 1024 * 1024
 
 
 def _normalize_category(classification: str) -> str:
@@ -449,8 +467,8 @@ class EngineUnavailableError(RuntimeError):
 class EngineSettings:
     path: str = "stockfish.exe" if os.name == "nt" else "stockfish"
     depth: int = 15
-    threads: int = 2
-    hash_mb: int = 256
+    threads: int = 1
+    hash_mb: int = 16
     timeout_seconds: float = 30.0
     move_time_seconds: float = 0.75
     game_timeout_seconds: float = 90.0
@@ -946,6 +964,89 @@ def _format_eval(value: float) -> str:
     return f"{value:+.1f}"
 
 
+def _download_official_linux_stockfish() -> Path:
+    if sys.platform != "linux" or platform.machine().lower() not in {"x86_64", "amd64"}:
+        raise FileNotFoundError(
+            "Automatic Stockfish installation is supported only on Linux x86-64."
+        )
+
+    cache_dir = Path.home() / ".cache" / "chessreview" / _STOCKFISH_RELEASE_TAG
+    cache_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    cache_dir.chmod(0o700)
+    executable = cache_dir / "stockfish"
+    if executable.is_file() and not executable.is_symlink() and os.access(executable, os.X_OK):
+        return executable
+
+    archive_path: str | None = None
+    executable_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=cache_dir, prefix="stockfish-", delete=False) as archive:
+            archive_path = archive.name
+            request = Request(
+                _STOCKFISH_ARCHIVE_URL,
+                headers={"User-Agent": "ChessReview/1.0"},
+            )
+            digest = hashlib.sha256()
+            total_bytes = 0
+            with urlopen(request, timeout=30) as response:
+                content_length = response.headers.get("Content-Length")
+                if content_length and int(content_length) > _MAX_STOCKFISH_ARCHIVE_BYTES:
+                    raise RuntimeError("Official Stockfish archive exceeds the download size limit.")
+                while chunk := response.read(1024 * 1024):
+                    total_bytes += len(chunk)
+                    if total_bytes > _MAX_STOCKFISH_ARCHIVE_BYTES:
+                        raise RuntimeError("Official Stockfish archive exceeds the download size limit.")
+                    digest.update(chunk)
+                    archive.write(chunk)
+
+        if digest.hexdigest() != _STOCKFISH_ARCHIVE_SHA256:
+            raise RuntimeError("Official Stockfish archive checksum verification failed.")
+
+        with tarfile.open(archive_path, mode="r:gz") as archive:
+            candidates = [
+                member
+                for member in archive.getmembers()
+                if member.isfile() and Path(member.name).name.lower().startswith("stockfish")
+            ]
+            if len(candidates) != 1:
+                raise RuntimeError("Official Stockfish archive has an unexpected file layout.")
+            member = candidates[0]
+            if not 0 < member.size <= _MAX_STOCKFISH_BINARY_BYTES:
+                raise RuntimeError("Stockfish binary has an invalid size.")
+            source = archive.extractfile(member)
+            if source is None:
+                raise RuntimeError("Stockfish binary could not be read from its archive.")
+
+            with source, tempfile.NamedTemporaryFile(
+                dir=cache_dir,
+                prefix="stockfish-binary-",
+                delete=False,
+            ) as binary:
+                executable_path = binary.name
+                copied_bytes = 0
+                while chunk := source.read(1024 * 1024):
+                    copied_bytes += len(chunk)
+                    if copied_bytes > member.size:
+                        raise RuntimeError("Stockfish archive member exceeded its declared size.")
+                    binary.write(chunk)
+                if copied_bytes != member.size:
+                    raise RuntimeError("Stockfish archive member was incomplete.")
+
+        os.chmod(executable_path, 0o700)
+        os.replace(executable_path, executable)
+        executable_path = None
+        return executable
+    except (OSError, tarfile.TarError, URLError, ValueError) as exc:
+        raise RuntimeError("Could not download and install verified official Stockfish.") from exc
+    finally:
+        for temporary_path in (archive_path, executable_path):
+            if temporary_path is not None:
+                try:
+                    os.unlink(temporary_path)
+                except FileNotFoundError:
+                    pass
+
+
 def _resolve_engine_path(configured_path: str) -> str:
     candidate = Path(configured_path).expanduser()
 
@@ -972,6 +1073,8 @@ def _resolve_engine_path(configured_path: str) -> str:
             path=os.pathsep.join(trusted_entries),
         )
         if path_candidate is None:
+            if configured_path == "stockfish":
+                return str(_download_official_linux_stockfish())
             raise FileNotFoundError(
                 "Stockfish was not found on PATH. Set STOCKFISH_PATH to an absolute executable path."
             )

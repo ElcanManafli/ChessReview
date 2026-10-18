@@ -1,4 +1,8 @@
 import asyncio
+import hashlib
+import io
+import os
+import tarfile
 import time
 
 import chess
@@ -7,6 +11,7 @@ import jwt
 import pytest
 from fastapi import HTTPException
 
+from backend import analyzer as analyzer_module
 from backend import main as api
 from backend.analyzer import (
     BRILLIANT_MIN_SACRIFICE_CP,
@@ -22,6 +27,66 @@ from backend.analyzer import (
     move_symbol,
 )
 from backend.main import RequestBodyLimitMiddleware, _compact_analysis
+
+
+def test_official_stockfish_download_verifies_and_extracts_binary(tmp_path, monkeypatch):
+    binary_contents = b"trusted-stockfish-binary"
+    archive_buffer = io.BytesIO()
+    with tarfile.open(fileobj=archive_buffer, mode="w:gz") as archive:
+        member = tarfile.TarInfo("stockfish/stockfish-linux-x86-64")
+        member.size = len(binary_contents)
+        member.mode = 0o755
+        archive.addfile(member, io.BytesIO(binary_contents))
+    archive_contents = archive_buffer.getvalue()
+
+    class FakeResponse(io.BytesIO):
+        def __init__(self, contents):
+            super().__init__(contents)
+            self.headers = {"Content-Length": str(len(contents))}
+
+    downloaded_urls = []
+
+    def fake_urlopen(request, timeout):
+        downloaded_urls.append((request.full_url, timeout))
+        return FakeResponse(archive_contents)
+
+    chmod_calls = []
+
+    def fake_path_chmod(path, mode, *, follow_symlinks=True):
+        chmod_calls.append(mode)
+
+    monkeypatch.setattr(analyzer_module.sys, "platform", "linux")
+    monkeypatch.setattr(analyzer_module.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(analyzer_module.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(
+        analyzer_module,
+        "_STOCKFISH_ARCHIVE_SHA256",
+        hashlib.sha256(archive_contents).hexdigest(),
+    )
+    monkeypatch.setattr(analyzer_module, "urlopen", fake_urlopen)
+    monkeypatch.setattr(analyzer_module.Path, "chmod", fake_path_chmod)
+    monkeypatch.setattr(
+        analyzer_module.os,
+        "chmod",
+        lambda path, mode, **kwargs: chmod_calls.append(mode),
+    )
+
+    executable = analyzer_module._download_official_linux_stockfish()
+
+    assert executable.read_bytes() == binary_contents
+    assert downloaded_urls == [(analyzer_module._STOCKFISH_ARCHIVE_URL, 30)]
+    assert chmod_calls == [0o700, 0o700]
+
+
+def test_resolve_engine_path_downloads_stockfish_when_missing_on_linux(tmp_path, monkeypatch):
+    executable = tmp_path / "stockfish"
+    executable.touch()
+    monkeypatch.setattr(analyzer_module.sys, "platform", "linux")
+    monkeypatch.setattr(analyzer_module.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(analyzer_module.shutil, "which", lambda *args, **kwargs: None)
+    monkeypatch.setattr(analyzer_module, "_download_official_linux_stockfish", lambda: executable)
+
+    assert _resolve_engine_path("stockfish") == str(executable)
 
 
 def test_analyze_pgn_returns_opening_book_move_without_engine():

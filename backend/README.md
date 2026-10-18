@@ -17,9 +17,13 @@ should verify access tokens against the project's Auth JWKS endpoint; set
 empty when using JWKS, and rotate it if it has been disclosed.
 
 `STOCKFISH_PATH` is either a bare executable name resolved on `PATH` or an absolute
-path to an executable regular file. The service never searches or executes a binary
-from its current working directory by default. Configure `REDIS_URL` for the Redis
-instance used by all backend workers. The default is local Redis at
+path to an executable regular file. On Linux x86-64, if the default `stockfish`
+executable is missing from `PATH`, the analyzer downloads the pinned official
+Stockfish release, verifies its SHA-256 checksum, and caches the executable in the
+service user's private cache directory. The first startup therefore needs internet
+access. The service never searches or executes a binary from its current working
+directory by default. Configure `REDIS_URL` for the Redis instance used by all backend
+workers. The default is local Redis at
 `redis://localhost:6379/0`. Redis is optional: analysis continues if Redis is
 missing or unreachable; live-game HTTP and WebSocket requests return a service
 unavailable response instead.
