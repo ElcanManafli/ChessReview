@@ -119,9 +119,12 @@ export const SAMPLE_PGN = `[Event "Immortal Game"]
 15. Bxf4 Qf6 16. Nc3 Bc5 17. Nd5 Qxb2 18. Bd6 Bxg1 19. e5 Qxa1+ 20. Ke2 Na6
 21. Nxg7+ Kd8 22. Qf6+ Nxf6 23. Be7#`;
 
-const API_URL = (import.meta.env["VITE_ANALYSIS_API_URL"] || "http://localhost:8000").replace(
-  /\/$/,
-  "",
+function normalizeApiUrl(value: string): string {
+  return value.trim().replace(/\/+$/, "");
+}
+
+const API_URL = normalizeApiUrl(
+  import.meta.env["VITE_ANALYSIS_API_URL"] || "http://localhost:8000",
 );
 
 async function decodeAnalysisResponse(response: Response): Promise<GameAnalysis> {

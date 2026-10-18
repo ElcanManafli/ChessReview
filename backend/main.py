@@ -353,6 +353,8 @@ app = FastAPI(
     description="Chess game analysis and authenticated Redis-backed live games.",
     lifespan=lifespan,
 )
+app.add_middleware(RequestBodyLimitMiddleware, max_bytes=MAX_REQUEST_BODY_BYTES)
+app.add_middleware(RequestSafetyMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
@@ -360,8 +362,6 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
 )
-app.add_middleware(RequestBodyLimitMiddleware, max_bytes=MAX_REQUEST_BODY_BYTES)
-app.add_middleware(RequestSafetyMiddleware)
 
 
 class AnalyzeRequest(BaseModel):
