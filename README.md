@@ -9,8 +9,8 @@ As a first-year Computer Engineering student, my primary goal with this project 
 - How to integrate AI/Logic-based tools into a software ecosystem.
 
 ## 🛠️ Technologies Used
-- **Frontend:** [Burada istifadə etdiyin dili/freymvorku yaz: məs. HTML, CSS, JavaScript]
-- **Backend / AI Logic:** Python
+- **Frontend:** React,TypeScript,vite
+- **Backend / AI Logic:** Python, FastApi
 - **Version Control:** Git & GitHub
 
 ## ⚠️ Important Note on Development
