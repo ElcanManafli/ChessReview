@@ -19,5 +19,3 @@ This project was developed with the active assistance of AI tools (like ChatGPT/
 ## 📌 Current Status
 The project is currently in the **development and testing phase**. The application is functional, but the accuracy of the AI-based move analysis is still being optimized.
 
-## 🎯 Future Goals
-My next step is to completely rebuild the backend of this system using **Java (Spring Boot)** to achieve industry-standard architecture, improve performance, and reduce reliance on AI-generated logic.
